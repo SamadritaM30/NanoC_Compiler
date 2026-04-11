@@ -1,29 +1,26 @@
+%code requires {
+    #include "tac.h"
+}
 %{
+
+#include "tac.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
 
-/* lexer exports these */
+
 extern int yylineno;
 extern FILE *yyin;
 int yylex(void);
 void yyerror(const char *s);
 
-/* ------------------------- AST / IR NODE ------------------------- */
-typedef struct Node {
-    char *place;   /* final result / temporary / constant / identifier */
-    char *code;    /* generated three-address code */
-} Node;
-
-/* ------------------------- GLOBALS ------------------------- */
 static int temp_count = 0;
 static int label_count = 0;
 static int syntax_errors = 0;
 static int semantic_errors = 0;
 
-/* ------------------------- SYMBOL TABLE ------------------------- */
 #define MAX_SYMBOLS 256
 
 typedef struct {
@@ -35,7 +32,6 @@ typedef struct {
 static Symbol symtab[MAX_SYMBOLS];
 static int symcount = 0;
 
-/* ------------------------- CSE CACHE ------------------------- */
 #define MAX_CSE 256
 typedef struct {
     char *key;
@@ -45,7 +41,6 @@ typedef struct {
 static CSEntry cse_cache[MAX_CSE];
 static int cse_count = 0;
 
-/* ------------------------- SMALL STRING HELPERS ------------------------- */
 static char *xstrdup(const char *s) {
     if (!s) return NULL;
     size_t n = strlen(s);
