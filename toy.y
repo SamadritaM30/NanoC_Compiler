@@ -20,6 +20,58 @@ int dump_lex = 0;
 /* ─────────────────────────────────────────
    Data structures
    ───────────────────────────────────────── */
+
+typedef struct ASTNode {
+    char label[64];     // for tree (like "+")
+    char place[64];     // for TAC (like "t1")
+    struct ASTNode *children[10];
+    int count;
+} ASTNode;
+
+ASTNode *root = NULL;
+
+ASTNode* makeNode(const char *label) {
+    ASTNode *n = malloc(sizeof(ASTNode));
+    strcpy(n->label, label);
+    strcpy(n->place, label);   // default
+    n->count = 0;
+    return n;
+}
+
+void addChild(ASTNode *p, ASTNode *c) {
+    if (p && c) p->children[p->count++] = c;
+}
+
+void printTree(ASTNode *node, int depth, int isLast, int prefix[]) {
+    if (!node) return;
+
+    // print branches
+    for (int i = 0; i < depth; i++) {
+        if (prefix[i])
+            printf("│   ");
+        else
+            printf("    ");
+    }
+
+    if (depth > 0) {
+        if (isLast)
+            printf("└── ");
+        else
+            printf("├── ");
+    }
+
+    printf("%s\n", node->label);
+
+    // update prefix for children
+    if (depth >= 0)
+        prefix[depth] = !isLast;
+
+    for (int i = 0; i < node->count; i++) {
+        printTree(node->children[i], depth + 1,
+                  (i == node->count - 1), prefix);
+    }
+}
+
 typedef struct {
     char op[16];
     char arg1[64];
@@ -460,15 +512,20 @@ static void generate_assembly(Quad *arr, int n) {
    Bison declarations
    ================================================================ */
 
+%code requires {
+    typedef struct ASTNode ASTNode;
+}
+
 %union {
     char *str;
+    ASTNode *node;
 }
 
 %token <str> ID NUM RELOP
 %token INT IF ELSE WHILE
 
-%type <str> expr cond
-%type <str> if_header while_header
+%type <str> cond if_header while_header
+%type <node> program stmts stmt decl idlist assign expr
 
 /* Operator precedence (low → high) */
 %right '='
@@ -487,25 +544,61 @@ static void generate_assembly(Quad *arr, int n) {
 
 program
     : stmts
-    ;
-
+      {
+          root = $1;
+      }
+    
 stmts
     : stmts stmt
+      {
+          addChild($1, $2);
+          $$ = $1;
+      }
     | stmt
+      {
+          ASTNode *n = makeNode("stmts");
+          addChild(n, $1);
+          $$ = n;
+      }
     ;
 
 stmt
     : decl ';'
-    | assign ';'
-    | if_stmt
-    | while_stmt
-    | block
-    | ';'
-    | error ';'   /* ERROR RECOVERY: skip bad statement, resync at ';' */
       {
-          yyerrok;   /* clear the error state so parsing continues */
+          $$ = $1;
       }
-    ;
+
+    | assign ';'
+      {
+          $$ = $1;
+      }
+
+    | if_stmt
+      {
+          $$ = makeNode("if");
+      }
+
+    | while_stmt
+      {
+          $$ = makeNode("while");
+      }
+
+    | block
+      {
+          $$ = makeNode("block");
+      }
+
+    | ';'
+      {
+          $$ = makeNode("empty");
+      }
+
+    | error ';'
+      {
+          yyerrok;
+          $$ = makeNode("error");
+      }
+;
 
 block
     : '{' stmts '}'
@@ -515,34 +608,45 @@ block
 
 decl
     : INT idlist
-    ;
+      {
+          ASTNode *n = makeNode("decl(int)");
+          addChild(n, $2);
+          $$ = n;
+      }
 
 idlist
     : idlist ',' ID
       {
           declare_var($3, "int");
+          addChild($1, makeNode($3));
+          $$ = $1;
           free($3);
       }
     | ID
       {
           declare_var($1, "int");
+          ASTNode *n = makeNode("idlist");
+          addChild(n, makeNode($1));
+          $$ = n;
           free($1);
       }
     ;
-
 /* ── Assignment ────────────────────────────────────────────────── */
 
 assign
     : ID '=' expr
       {
-          /* Semantic check: LHS must be declared */
           int errs_before = semantic_error_count;
           use_var($1);
-          /* Only emit quad when LHS is a valid declared variable */
           if (semantic_error_count == errs_before)
-              emit("=", $3, "", $1);
+              emit("=", $3->place, "", $1);
+
+          ASTNode *n = makeNode("=");
+          addChild(n, makeNode($1));
+          addChild(n, $3);
+          $$ = n;
+
           free($1);
-          free($3);
       }
     ;
 
@@ -552,44 +656,64 @@ expr
     : expr '+' expr
       {
           char *t = new_temp();
-          emit("+", $1, $3, t);
-          $$ = t;
-          free($1); free($3);
+          emit("+", $1->label, $3->label, t);
+
+          ASTNode *n = makeNode("+");
+          addChild(n, $1);
+          addChild(n, $3);
+          strcpy(n->place, t); 
+          $$ = n;
       }
     | expr '-' expr
       {
           char *t = new_temp();
-          emit("-", $1, $3, t);
-          $$ = t;
-          free($1); free($3);
+          emit("-", $1->label, $3->label, t);
+
+          ASTNode *n = makeNode("-");
+          addChild(n, $1);
+          addChild(n, $3);
+          strcpy(n->place, t); 
+          $$ = n;
       }
     | expr '*' expr
       {
           char *t = new_temp();
-          emit("*", $1, $3, t);
-          $$ = t;
-          free($1); free($3);
+          emit("*", $1->label, $3->label, t);
+
+          ASTNode *n = makeNode("*");
+          addChild(n, $1);
+          addChild(n, $3);
+          strcpy(n->place, t); 
+          $$ = n;
       }
     | expr '/' expr
       {
           char *t = new_temp();
-          emit("/", $1, $3, t);
-          $$ = t;
-          free($1); free($3);
+          emit("/", $1->label, $3->label, t);
+
+          ASTNode *n = makeNode("/");
+          addChild(n, $1);
+          addChild(n, $3);
+          strcpy(n->place, t); 
+          $$ = n;
       }
     | '(' expr ')'
       {
           $$ = $2;
       }
     | ID
-      {
-          use_var($1);   /* semantic: records error if undeclared, but continues */
-          $$ = $1;
-      }
+    {
+        use_var($1);
+        ASTNode *n = makeNode($1);
+        strcpy(n->place, $1);
+        $$ = n;
+    }
     | NUM
-      {
-          $$ = $1;
-      }
+    {
+        ASTNode *n = makeNode($1);
+        strcpy(n->place, $1);
+        $$ = n;
+    }
     ;
 
 /* ── Conditions ────────────────────────────────────────────────── */
@@ -597,11 +721,10 @@ expr
 cond
     : expr RELOP expr
       {
-          /* Build the condition string, e.g. "a > b" */
-          char *s = malloc(strlen($1) + strlen($2) + strlen($3) + 4);
-          if (!s) { fprintf(stderr, "Memory allocation failed\n"); exit(1); }
-          sprintf(s, "%s %s %s", $1, $2, $3);
-          free($1); free($2); free($3);
+          char *s = malloc(strlen($1->label) + strlen($2) + strlen($3->label) + 4);
+          sprintf(s, "%s %s %s", $1->label, $2, $3->label);
+
+          free($2);  // RELOP string
           $$ = s;
       }
     ;
@@ -735,6 +858,10 @@ int main(int argc, char *argv[]) {
         printf("Found %d syntax error(s). Erroneous statements skipped.\n", syntax_error_count);
     } else {
         printf("No syntax errors.\n");
+        printf("\nSyntax Tree\n");
+        printf("------------\n");
+        int prefix[100] = {0};
+        printTree(root, 0, 1, prefix);
     }
 
     /* ── Phase 3: Semantic Analysis ────────────────────────────── */
