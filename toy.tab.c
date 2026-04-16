@@ -69,515 +69,516 @@
 /* First part of user prologue.  */
 #line 1 "toy.y"
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <ctype.h>
+    #include <stdio.h>
+    #include <stdlib.h>
+    #include <string.h>
+    #include <ctype.h>
 
-extern int yylineno;
-extern FILE *yyin;
-void yyrestart(FILE *input_file);
+    extern int yylineno;
+    extern FILE *yyin;
+    void yyrestart(FILE *input_file);
 
-int yylex(void);
-void yyerror(const char *s);
+    int yylex(void);
+    void yyerror(const char *s);
 
-int dump_lex = 0;
+    int dump_lex = 0;
 
-#define MAX_SYMBOLS 200
-#define MAX_QUADS   500
-#define MAX_STACK   100
+    #define MAX_SYMBOLS 200
+    #define MAX_QUADS   500
+    #define MAX_STACK   100
 
-/* ─────────────────────────────────────────
-   Data structures
-   ───────────────────────────────────────── */
+    /* ─────────────────────────────────────────
+    Data structures
+    ───────────────────────────────────────── */
 
-typedef struct ASTNode {
-    char label[64];     // for tree (like "+")
-    char place[64];     // for TAC (like "t1")
-    struct ASTNode *children[10];
-    int count;
-} ASTNode;
+    typedef struct ASTNode {
+        char label[64];     // for tree (like "+")
+        char place[64];     // for TAC (like "t1")
+        struct ASTNode *children[10];
+        int count;
+    } ASTNode;
 
-ASTNode *root = NULL;
+    ASTNode *root = NULL;
 
-ASTNode* makeNode(const char *label) {
-    ASTNode *n = malloc(sizeof(ASTNode));
-    strcpy(n->label, label);
-    strcpy(n->place, label);   // default
-    n->count = 0;
-    return n;
-}
-
-void addChild(ASTNode *p, ASTNode *c) {
-    if (p && c) p->children[p->count++] = c;
-}
-
-void printTree(ASTNode *node, int depth, int isLast, int prefix[]) {
-    if (!node) return;
-
-    // print branches
-    for (int i = 0; i < depth; i++) {
-        if (prefix[i])
-            printf("│   ");
-        else
-            printf("    ");
+    ASTNode* makeNode(const char *label) {
+        ASTNode *n = malloc(sizeof(ASTNode));
+        strcpy(n->label, label);
+        strcpy(n->place, label);   // default
+        n->count = 0;
+        return n;
     }
 
-    if (depth > 0) {
-        if (isLast)
-            printf("└── ");
-        else
-            printf("├── ");
+    void addChild(ASTNode *p, ASTNode *c) {
+        if (p && c) p->children[p->count++] = c;
     }
 
-    printf("%s\n", node->label);
+    void printTree(ASTNode *node, int depth, int isLast, int prefix[]) {
+        if (!node) return;
 
-    // update prefix for children
-    if (depth >= 0)
-        prefix[depth] = !isLast;
+        // print branches
+        for (int i = 0; i < depth; i++) {
+            if (prefix[i])
+                printf("│   ");
+            else
+                printf("    ");
+        }
 
-    for (int i = 0; i < node->count; i++) {
-        printTree(node->children[i], depth + 1,
-                  (i == node->count - 1), prefix);
-    }
-}
+        if (depth > 0) {
+            if (isLast)
+                printf("└── ");
+            else
+                printf("├── ");
+        }
 
-typedef struct {
-    char op[16];
-    char arg1[64];
-    char arg2[64];
-    char res[64];
-} Quad;
+        printf("%s\n", node->label);
 
-typedef struct {
-    char *t;   /* true  label */
-    char *f;   /* false label */
-    char *e;   /* end   label (else branch) */
-} IfCtx;
+        // update prefix for children
+        if (depth >= 0)
+            prefix[depth] = !isLast;
 
-typedef struct {
-    char *start;
-    char *body;
-    char *end;
-} WhileCtx;
-
-typedef struct {
-    char name[32];
-    int  valid;
-    int  value;
-} ConstEntry;
-
-/* ─────────────────────────────────────────
-   Symbol / type table
-   ───────────────────────────────────────── */
-typedef struct {
-    char name[32];
-    char type[16];   /* "int" for now */
-} Symbol;
-
-Symbol symTable[MAX_SYMBOLS];
-int sc = 0;
-
-/* ─────────────────────────────────────────
-   Quad tables
-   ───────────────────────────────────────── */
-Quad quads[MAX_QUADS];
-Quad optQuads[MAX_QUADS];
-int qCount  = 0;
-int optCount = 0;
-
-/* ─────────────────────────────────────────
-   Constant propagation table
-   ───────────────────────────────────────── */
-ConstEntry consts[MAX_SYMBOLS];
-int constCount = 0;
-
-/* ─────────────────────────────────────────
-   If / while stacks
-   ───────────────────────────────────────── */
-IfCtx    ifStack[MAX_STACK];
-WhileCtx whileStack[MAX_STACK];
-int ifTop    = -1;
-int whileTop = -1;
-
-/* ─────────────────────────────────────────
-   Counters
-   ───────────────────────────────────────── */
-int tempCount  = 1;
-int labelCount = 1;
-
-/* ================================================================
-   Utility helpers
-   ================================================================ */
-
-static char *dupstr(const char *s) {
-    char *p = malloc(strlen(s) + 1);
-    if (!p) { fprintf(stderr, "Memory allocation failed\n"); exit(1); }
-    strcpy(p, s);
-    return p;
-}
-
-static int is_number(const char *s) {
-    if (!s || !*s) return 0;
-    int i = 0;
-    if (s[0] == '-' && s[1]) i = 1;
-    for (; s[i]; i++)
-        if (!isdigit((unsigned char)s[i])) return 0;
-    return 1;
-}
-
-static int is_temp_name(const char *s) {
-    return s && s[0] == 't' && is_number(s + 1);
-}
-
-/* ================================================================
-   Symbol table
-   ================================================================ */
-
-static int lookup_symbol(const char *name) {
-    for (int i = 0; i < sc; i++)
-        if (strcmp(symTable[i].name, name) == 0) return i;
-    return -1;
-}
-
-static void declare_var(const char *name, const char *type) {
-    if (lookup_symbol(name) >= 0) {
-        printf("Semantic Warning: variable '%s' already declared\n", name);
-        return;
-    }
-    if (sc >= MAX_SYMBOLS) { printf("Symbol table full\n"); exit(1); }
-    strcpy(symTable[sc].name, name);
-    strcpy(symTable[sc].type, type);
-    sc++;
-}
-
-/* Semantic error counter */
-static int semantic_error_count = 0;
-
-/* Returns the type string for the variable.
-   On undeclared variable: records the error, returns "int" as safe dummy
-   so parsing and code-gen can continue for all remaining statements. */
-static const char *use_var(const char *name) {
-    int idx = lookup_symbol(name);
-    if (idx < 0) {
-        printf("  Line %d: Semantic error - undeclared variable '%s'\n",
-               yylineno, name);
-        semantic_error_count++;
-        return "int";   /* safe dummy — let compilation continue */
-    }
-    return symTable[idx].type;
-}
-
-static char *new_temp(void) {
-    char buf[32];
-    sprintf(buf, "t%d", tempCount++);
-    return dupstr(buf);
-}
-
-static char *new_label(void) {
-    char buf[32];
-    sprintf(buf, "L%d", labelCount++);
-    return dupstr(buf);
-}
-
-/* ================================================================
-   Quad emission
-   ================================================================ */
-
-static void emit(const char *op, const char *a1, const char *a2,
-                 const char *res) {
-    if (qCount >= MAX_QUADS) { printf("Quad array full\n"); exit(1); }
-    strncpy(quads[qCount].op,   op  ? op  : "", 15);
-    strncpy(quads[qCount].arg1, a1  ? a1  : "", 63);
-    strncpy(quads[qCount].arg2, a2  ? a2  : "", 63);
-    strncpy(quads[qCount].res,  res ? res : "", 63);
-    qCount++;
-}
-
-/* ================================================================
-   Printing
-   ================================================================ */
-
-static void print_symbol_table(void) {
-    printf("\n[Phase 3] Symbol Table\n");
-    printf("-----------------------\n");
-    for (int i = 0; i < sc; i++)
-        printf("  %d. %s  [type: %s]\n", i + 1, symTable[i].name,
-               symTable[i].type);
-}
-
-static void print_quads(Quad *arr, int n, const char *title) {
-    (void)title;
-    for (int i = 0; i < n; i++) {
-        Quad *q = &arr[i];
-        if (strcmp(q->op, "+") == 0 || strcmp(q->op, "-") == 0 ||
-            strcmp(q->op, "*") == 0 || strcmp(q->op, "/") == 0) {
-            printf("  %s = %s %s %s\n", q->res, q->arg1, q->op, q->arg2);
-        } else if (strcmp(q->op, "=") == 0) {
-            printf("  %s = %s\n", q->res, q->arg1);
-        } else if (strcmp(q->op, "ifgoto") == 0) {
-            printf("  if %s goto %s\n", q->arg1, q->res);
-        } else if (strcmp(q->op, "goto") == 0) {
-            printf("  goto %s\n", q->res);
-        } else if (strcmp(q->op, "label") == 0) {
-            printf("%s:\n", q->res);
-        } else {
-            printf("  %s %s %s %s\n", q->op, q->arg1, q->arg2, q->res);
+        for (int i = 0; i < node->count; i++) {
+            printTree(node->children[i], depth + 1,
+                    (i == node->count - 1), prefix);
         }
     }
-}
 
-/* ================================================================
-   Constant propagation / folding helpers
-   ================================================================ */
+    typedef struct {
+        char op[16];
+        char arg1[64];
+        char arg2[64];
+        char res[64];
+    } Quad;
 
-static int compute_arith(int x, int y, const char *op) {
-    if (strcmp(op, "+") == 0) return x + y;
-    if (strcmp(op, "-") == 0) return x - y;
-    if (strcmp(op, "*") == 0) return x * y;
-    if (strcmp(op, "/") == 0) return (y == 0) ? 0 : x / y;
-    return 0;
-}
+    typedef struct {
+        char *t;   /* true  label */
+        char *f;   /* false label */
+        char *e;   /* end   label (else branch) */
+    } IfCtx;
 
-static void clear_consts(void) {
-    for (int i = 0; i < constCount; i++) consts[i].valid = 0;
-}
+    typedef struct {
+        char *start;
+        char *body;
+        char *end;
+    } WhileCtx;
 
-static int get_const_value(const char *name, int *value) {
-    if (is_number(name)) { *value = atoi(name); return 1; }
-    for (int i = 0; i < constCount; i++)
-        if (consts[i].valid && strcmp(consts[i].name, name) == 0) {
-            *value = consts[i].value; return 1;
+    typedef struct {
+        char name[32];
+        int  valid;
+        int  value;
+    } ConstEntry;
+
+    /* ─────────────────────────────────────────
+    Symbol / type table
+    ───────────────────────────────────────── */
+    typedef struct {
+        char name[32];
+        char type[16];   /* "int"*/
+    } Symbol;
+
+    Symbol symTable[MAX_SYMBOLS];
+    int sc = 0;
+
+    /* ─────────────────────────────────────────
+    Quad tables
+    ───────────────────────────────────────── */
+    Quad quads[MAX_QUADS];
+    Quad optQuads[MAX_QUADS];
+    int qCount  = 0;
+    int optCount = 0;
+
+    /* ─────────────────────────────────────────
+    Constant propagation table
+    ───────────────────────────────────────── */
+    ConstEntry consts[MAX_SYMBOLS];
+    int constCount = 0;
+
+    /* ─────────────────────────────────────────
+    If / while stacks
+    ───────────────────────────────────────── */
+    IfCtx    ifStack[MAX_STACK];
+    WhileCtx whileStack[MAX_STACK];
+    int ifTop    = -1;
+    int whileTop = -1;
+
+    /* ─────────────────────────────────────────
+    Counters
+    ───────────────────────────────────────── */
+    int tempCount  = 1;
+    int labelCount = 1;
+
+    /* ================================================================
+    Utility helpers
+    ================================================================ */
+
+    static char *dupstr(const char *s) {
+        char *p = malloc(strlen(s) + 1);
+        if (!p) { fprintf(stderr, "Memory allocation failed\n"); exit(1); }
+        strcpy(p, s);
+        return p;
+    }
+
+    static int is_number(const char *s) {
+        if (!s || !*s) return 0;
+        int i = 0;
+        if (s[0] == '-' && s[1]) i = 1;
+        for (; s[i]; i++)
+            if (!isdigit((unsigned char)s[i])) return 0;
+        return 1;
+    }
+
+    static int is_temp_name(const char *s) {
+        return s && s[0] == 't' && is_number(s + 1);
+    }
+
+    /* ================================================================
+    Symbol table
+    ================================================================ */
+
+    static int lookup_symbol(const char *name) {
+        for (int i = 0; i < sc; i++)
+            if (strcmp(symTable[i].name, name) == 0) return i;
+        return -1;
+    }
+
+    static void declare_var(const char *name, const char *type) {
+        if (lookup_symbol(name) >= 0) {
+            printf("Semantic Warning: variable '%s' already declared\n", name);
+            return;
         }
-    return 0;
-}
+        if (sc >= MAX_SYMBOLS) { printf("Symbol table full\n"); exit(1); }
+        strcpy(symTable[sc].name, name);
+        strcpy(symTable[sc].type, type);
+        sc++;
+    }
 
-static void set_const_value(const char *name, int value) {
-    for (int i = 0; i < constCount; i++)
-        if (strcmp(consts[i].name, name) == 0) {
-            consts[i].valid = 1; consts[i].value = value; return;
+    /* Semantic error counter */
+    static int semantic_error_count = 0;
+
+    /* Returns the type string for the variable.
+    On undeclared variable: records the error, returns "int" as safe dummy
+    so parsing and code-gen can continue for all remaining statements. */
+    static const char *use_var(const char *name) {
+        int idx = lookup_symbol(name);
+        if (idx < 0) {
+            printf("  Line %d: Semantic error - undeclared variable '%s'\n",
+                yylineno, name);
+            semantic_error_count++;
+            return "int";   /* safe dummy — let compilation continue */
         }
-    strncpy(consts[constCount].name, name, 31);
-    consts[constCount].valid = 1;
-    consts[constCount].value = value;
-    constCount++;
-}
+        return symTable[idx].type;
+    }
 
-static void kill_const(const char *name) {
-    for (int i = 0; i < constCount; i++)
-        if (strcmp(consts[i].name, name) == 0) { consts[i].valid = 0; return; }
-}
+    static char *new_temp(void) {
+        char buf[32];
+        sprintf(buf, "t%d", tempCount++);
+        return dupstr(buf);
+    }
 
-/* ================================================================
-   Optimiser  (constant folding + constant propagation)
-   ================================================================ */
+    static char *new_label(void) {
+        char buf[32];
+        sprintf(buf, "L%d", labelCount++);
+        return dupstr(buf);
+    }
 
-static void optimize_quads(void) {
-    optCount = 0;
-    clear_consts();
+    /* ================================================================
+    Quad emission
+    ================================================================ */
 
-    for (int i = 0; i < qCount; i++) {
-        Quad q = quads[i];
+    static void emit(const char *op, const char *a1, const char *a2,
+                    const char *res) {
+        if (qCount >= MAX_QUADS) { printf("Quad array full\n"); exit(1); }
+        strncpy(quads[qCount].op,   op  ? op  : "", 15);
+        strncpy(quads[qCount].arg1, a1  ? a1  : "", 63);
+        strncpy(quads[qCount].arg2, a2  ? a2  : "", 63);
+        strncpy(quads[qCount].res,  res ? res : "", 63);
+        qCount++;
+    }
 
-        /* ── arithmetic ───────────────────────────────────────── */
-        if (strcmp(q.op, "+") == 0 || strcmp(q.op, "-") == 0 ||
-            strcmp(q.op, "*") == 0 || strcmp(q.op, "/") == 0) {
+    /* ================================================================
+    Printing
+    ================================================================ */
 
-            /* Propagate known constants into operands */
-            int a, b;
-            char left[64], right[64];
+    static void print_symbol_table(void) {
+        printf("\n[Phase 3] Symbol Table\n");
+        printf("-----------------------\n");
+        for (int i = 0; i < sc; i++)
+            printf("  %d. %s  [type: %s]\n", i + 1, symTable[i].name,
+                symTable[i].type);
+    }
 
-            if (get_const_value(q.arg1, &a)) sprintf(left,  "%d", a);
-            else                              strcpy(left,  q.arg1);
+    static void print_quads(Quad *arr, int n, const char *title) {
+        (void)title;
+        for (int i = 0; i < n; i++) {
+            Quad *q = &arr[i];
+            if (strcmp(q->op, "+") == 0 || strcmp(q->op, "-") == 0 ||
+                strcmp(q->op, "*") == 0 || strcmp(q->op, "/") == 0) {
+                printf("  %s = %s %s %s\n", q->res, q->arg1, q->op, q->arg2);
+            } else if (strcmp(q->op, "=") == 0) {
+                printf("  %s = %s\n", q->res, q->arg1);
+            } else if (strcmp(q->op, "ifgoto") == 0) {
+                printf("  if %s goto %s\n", q->arg1, q->res);
+            } else if (strcmp(q->op, "goto") == 0) {
+                printf("  goto %s\n", q->res);
+            } else if (strcmp(q->op, "label") == 0) {
+                printf("%s:\n", q->res);
+            } else {
+                printf("  %s %s %s %s\n", q->op, q->arg1, q->arg2, q->res);
+            }
+        }
+    }
 
-            if (get_const_value(q.arg2, &b)) sprintf(right, "%d", b);
-            else                              strcpy(right, q.arg2);
+    /* ================================================================
+    Constant propagation / folding helpers
+    ================================================================ */
 
-            /* Check for pattern:  t = op … ; x = t  (temp copy-prop) */
-            if (i + 1 < qCount &&
-                strcmp(quads[i+1].op,   "=")    == 0 &&
-                strcmp(quads[i+1].arg1, q.res)  == 0 &&
-                is_temp_name(q.res)) {
+    static int compute_arith(int x, int y, const char *op) {
+        if (strcmp(op, "+") == 0) return x + y;
+        if (strcmp(op, "-") == 0) return x - y;
+        if (strcmp(op, "*") == 0) return x * y;
+        if (strcmp(op, "/") == 0) return (y == 0) ? 0 : x / y;
+        return 0;
+    }
 
-                char target[64];
-                strcpy(target, quads[i+1].res);
+    static void clear_consts(void) {
+        for (int i = 0; i < constCount; i++) consts[i].valid = 0;
+    }
 
+    static int get_const_value(const char *name, int *value) {
+        if (is_number(name)) { *value = atoi(name); return 1; }
+        for (int i = 0; i < constCount; i++)
+            if (consts[i].valid && strcmp(consts[i].name, name) == 0) {
+                *value = consts[i].value; return 1;
+            }
+        return 0;
+    }
+
+    static void set_const_value(const char *name, int value) {
+        for (int i = 0; i < constCount; i++)
+            if (strcmp(consts[i].name, name) == 0) {
+                consts[i].valid = 1; consts[i].value = value; return;
+            }
+        strncpy(consts[constCount].name, name, 31);
+        consts[constCount].valid = 1;
+        consts[constCount].value = value;
+        constCount++;
+    }
+
+    static void kill_const(const char *name) {
+        for (int i = 0; i < constCount; i++)
+            if (strcmp(consts[i].name, name) == 0) { consts[i].valid = 0; return; }
+    }
+
+    /* ================================================================
+    Optimiser  (constant folding + constant propagation)
+    ================================================================ */
+
+    static void optimize_quads(void) {
+        optCount = 0;
+        clear_consts();
+
+        for (int i = 0; i < qCount; i++) {
+            Quad q = quads[i];
+
+            /* ── arithmetic ───────────────────────────────────────── */
+            if (strcmp(q.op, "+") == 0 || strcmp(q.op, "-") == 0 ||
+                strcmp(q.op, "*") == 0 || strcmp(q.op, "/") == 0) {
+
+                /* Propagate known constants into operands */
+                int a, b;
+                char left[64], right[64];
+
+                if (get_const_value(q.arg1, &a)) sprintf(left,  "%d", a);
+                else                              strcpy(left,  q.arg1);
+
+                if (get_const_value(q.arg2, &b)) sprintf(right, "%d", b);
+                else                              strcpy(right, q.arg2);
+
+                /* Check for pattern:  t = op … ; x = t  (temp copy-prop) */
+                if (i + 1 < qCount &&
+                    strcmp(quads[i+1].op,   "=")    == 0 &&
+                    strcmp(quads[i+1].arg1, q.res)  == 0 &&
+                    is_temp_name(q.res)) {
+
+                    char target[64];
+                    strcpy(target, quads[i+1].res);
+
+                    if (is_number(left) && is_number(right)) {
+                        int res = compute_arith(atoi(left), atoi(right), q.op);
+                        char buf[32]; sprintf(buf, "%d", res);
+                        strcpy(optQuads[optCount].op,   "=");
+                        strcpy(optQuads[optCount].arg1, buf);
+                        strcpy(optQuads[optCount].arg2, "");
+                        strcpy(optQuads[optCount].res,  target);
+                        optCount++;
+                        set_const_value(target, res);
+                    } else {
+                        strcpy(optQuads[optCount].op,   q.op);
+                        strcpy(optQuads[optCount].arg1, left);
+                        strcpy(optQuads[optCount].arg2, right);
+                        strcpy(optQuads[optCount].res,  target);
+                        optCount++;
+                        kill_const(target);
+                    }
+                    i++;   /* skip the "= t" quad */
+                    continue;
+                }
+
+                /* Standalone arithmetic quad */
                 if (is_number(left) && is_number(right)) {
                     int res = compute_arith(atoi(left), atoi(right), q.op);
                     char buf[32]; sprintf(buf, "%d", res);
                     strcpy(optQuads[optCount].op,   "=");
                     strcpy(optQuads[optCount].arg1, buf);
                     strcpy(optQuads[optCount].arg2, "");
-                    strcpy(optQuads[optCount].res,  target);
+                    strcpy(optQuads[optCount].res,  q.res);
                     optCount++;
-                    set_const_value(target, res);
+                    set_const_value(q.res, res);
                 } else {
                     strcpy(optQuads[optCount].op,   q.op);
                     strcpy(optQuads[optCount].arg1, left);
                     strcpy(optQuads[optCount].arg2, right);
-                    strcpy(optQuads[optCount].res,  target);
+                    strcpy(optQuads[optCount].res,  q.res);
                     optCount++;
-                    kill_const(target);
+                    kill_const(q.res);
                 }
-                i++;   /* skip the "= t" quad */
-                continue;
-            }
 
-            /* Standalone arithmetic quad */
-            if (is_number(left) && is_number(right)) {
-                int res = compute_arith(atoi(left), atoi(right), q.op);
-                char buf[32]; sprintf(buf, "%d", res);
-                strcpy(optQuads[optCount].op,   "=");
-                strcpy(optQuads[optCount].arg1, buf);
-                strcpy(optQuads[optCount].arg2, "");
+            /* ── assignment ───────────────────────────────────────── */
+            } else if (strcmp(q.op, "=") == 0) {
+                int val;
+                char src[64];
+                if (get_const_value(q.arg1, &val)) {
+                    sprintf(src, "%d", val);
+                    strcpy(optQuads[optCount].op,   "=");
+                    strcpy(optQuads[optCount].arg1, src);
+                    strcpy(optQuads[optCount].arg2, "");
+                    strcpy(optQuads[optCount].res,  q.res);
+                    optCount++;
+                    set_const_value(q.res, val);
+                } else {
+                    strcpy(optQuads[optCount].op,   "=");
+                    strcpy(optQuads[optCount].arg1, q.arg1);
+                    strcpy(optQuads[optCount].arg2, "");
+                    strcpy(optQuads[optCount].res,  q.res);
+                    optCount++;
+                    kill_const(q.res);
+                }
+
+            /* ── control flow ─────────────────────────────────────── */
+            } else if (strcmp(q.op, "label")   == 0 ||
+                    strcmp(q.op, "goto")    == 0 ||
+                    strcmp(q.op, "ifgoto")  == 0) {
+                clear_consts();          /* conservative: kill all on branch */
+                strcpy(optQuads[optCount].op,   q.op);
+                strcpy(optQuads[optCount].arg1, q.arg1);
+                strcpy(optQuads[optCount].arg2, q.arg2);
                 strcpy(optQuads[optCount].res,  q.res);
                 optCount++;
-                set_const_value(q.res, res);
+
+            /* ── anything else ────────────────────────────────────── */
             } else {
                 strcpy(optQuads[optCount].op,   q.op);
-                strcpy(optQuads[optCount].arg1, left);
-                strcpy(optQuads[optCount].arg2, right);
-                strcpy(optQuads[optCount].res,  q.res);
-                optCount++;
-                kill_const(q.res);
-            }
-
-        /* ── assignment ───────────────────────────────────────── */
-        } else if (strcmp(q.op, "=") == 0) {
-            int val;
-            char src[64];
-            if (get_const_value(q.arg1, &val)) {
-                sprintf(src, "%d", val);
-                strcpy(optQuads[optCount].op,   "=");
-                strcpy(optQuads[optCount].arg1, src);
-                strcpy(optQuads[optCount].arg2, "");
-                strcpy(optQuads[optCount].res,  q.res);
-                optCount++;
-                set_const_value(q.res, val);
-            } else {
-                strcpy(optQuads[optCount].op,   "=");
                 strcpy(optQuads[optCount].arg1, q.arg1);
-                strcpy(optQuads[optCount].arg2, "");
+                strcpy(optQuads[optCount].arg2, q.arg2);
                 strcpy(optQuads[optCount].res,  q.res);
                 optCount++;
-                kill_const(q.res);
             }
-
-        /* ── control flow ─────────────────────────────────────── */
-        } else if (strcmp(q.op, "label")   == 0 ||
-                   strcmp(q.op, "goto")    == 0 ||
-                   strcmp(q.op, "ifgoto")  == 0) {
-            clear_consts();          /* conservative: kill all on branch */
-            strcpy(optQuads[optCount].op,   q.op);
-            strcpy(optQuads[optCount].arg1, q.arg1);
-            strcpy(optQuads[optCount].arg2, q.arg2);
-            strcpy(optQuads[optCount].res,  q.res);
-            optCount++;
-
-        /* ── anything else ────────────────────────────────────── */
-        } else {
-            strcpy(optQuads[optCount].op,   q.op);
-            strcpy(optQuads[optCount].arg1, q.arg1);
-            strcpy(optQuads[optCount].arg2, q.arg2);
-            strcpy(optQuads[optCount].res,  q.res);
-            optCount++;
         }
     }
-}
 
-/* ================================================================
-   If / while context management
-   ================================================================ */
+    /* ================================================================
+    If / while context management
+    ================================================================ */
 
-static void push_if(void) {
-    ifTop++;
-    ifStack[ifTop].t = new_label();
-    ifStack[ifTop].f = new_label();
-    ifStack[ifTop].e = NULL;
-}
-static void pop_if(void)  { ifTop--; }
+    static void push_if(void) {
+        ifTop++;
+        ifStack[ifTop].t = new_label();
+        ifStack[ifTop].f = new_label();
+        ifStack[ifTop].e = NULL;
+    }
+    static void pop_if(void)  { ifTop--; }
 
-static char *if_true(void)  { return ifStack[ifTop].t; }
-static char *if_false(void) { return ifStack[ifTop].f; }
-static char *if_end(void) {
-    if (ifStack[ifTop].e == NULL)
-        ifStack[ifTop].e = new_label();
-    return ifStack[ifTop].e;
-}
+    static char *if_true(void)  { return ifStack[ifTop].t; }
+    static char *if_false(void) { return ifStack[ifTop].f; }
+    static char *if_end(void) {
+        if (ifStack[ifTop].e == NULL)
+            ifStack[ifTop].e = new_label();
+        return ifStack[ifTop].e;
+    }
 
-static void push_while(void) {
-    whileTop++;
-    whileStack[whileTop].start = new_label();
-    whileStack[whileTop].body  = new_label();
-    whileStack[whileTop].end   = new_label();
-}
-static void pop_while(void) { whileTop--; }
+    static void push_while(void) {
+        whileTop++;
+        whileStack[whileTop].start = new_label();
+        whileStack[whileTop].body  = new_label();
+        whileStack[whileTop].end   = new_label();
+    }
+    static void pop_while(void) { whileTop--; }
 
-static char *while_start(void) { return whileStack[whileTop].start; }
-static char *while_body(void)  { return whileStack[whileTop].body;  }
-static char *while_end(void)   { return whileStack[whileTop].end;   }
+    static char *while_start(void) { return whileStack[whileTop].start; }
+    static char *while_body(void)  { return whileStack[whileTop].body;  }
+    static char *while_end(void)   { return whileStack[whileTop].end;   }
 
-/* ================================================================
-   Assembly generation
-   (Hypothetical RISC ISA: LOADI, LOAD, STORE, ADD, SUB, MUL, DIV,
-    CMP, JLT, JGT, JLE, JGE, JE, JNE, JMP)
-   ================================================================ */
+    /* ================================================================
+    Assembly generation
+    (Hypothetical RISC ISA: LOADI, LOAD, STORE, ADD, SUB, MUL, DIV,
+        CMP, JLT, JGT, JLE, JGE, JE, JNE, JMP)
+    ================================================================ */
 
-static const char *branch_for_relop(const char *op) {
-    if (strcmp(op, "<")  == 0) return "JLT";
-    if (strcmp(op, ">")  == 0) return "JGT";
-    if (strcmp(op, "<=") == 0) return "JLE";
-    if (strcmp(op, ">=") == 0) return "JGE";
-    if (strcmp(op, "==") == 0) return "JE";
-    if (strcmp(op, "!=") == 0) return "JNE";
-    return "JMP";
-}
+    static const char *branch_for_relop(const char *op) {
+        if (strcmp(op, "<")  == 0) return "JLT";
+        if (strcmp(op, ">")  == 0) return "JGT";
+        if (strcmp(op, "<=") == 0) return "JLE";
+        if (strcmp(op, ">=") == 0) return "JGE";
+        if (strcmp(op, "==") == 0) return "JE";
+        if (strcmp(op, "!=") == 0) return "JNE";
+        return "JMP";
+    }
 
-static void load_operand(const char *opnd, const char *reg) {
-    if (is_number(opnd)) printf("  LOADI %s, #%s\n", reg, opnd);
-    else                 printf("  LOAD  %s, %s\n",  reg, opnd);
-}
+    static void load_operand(const char *opnd, const char *reg) {
+        if (is_number(opnd)) printf("  LOADI %s, #%s\n", reg, opnd);
+        else                 printf("  LOAD  %s, %s\n",  reg, opnd);
+    }
 
-static void generate_assembly(Quad *arr, int n) {
-    printf("\nAssembly Code\n");
-    printf("-------------\n");
+    static void generate_assembly(Quad *arr, int n) {
+        printf("\nAssembly Code\n");
+        printf("-------------\n");
 
-    for (int i = 0; i < n; i++) {
-        Quad *q = &arr[i];
+        for (int i = 0; i < n; i++) {
+            Quad *q = &arr[i];
 
-        if (strcmp(q->op, "label") == 0) {
-            printf("%s:\n", q->res);
+            if (strcmp(q->op, "label") == 0) {
+                printf("%s:\n", q->res);
 
-        } else if (strcmp(q->op, "goto") == 0) {
-            printf("  JMP %s\n", q->res);
+            } else if (strcmp(q->op, "goto") == 0) {
+                printf("  JMP %s\n", q->res);
 
-        } else if (strcmp(q->op, "ifgoto") == 0) {
-            char left[64], rel[8], right[64];
-            sscanf(q->arg1, "%63s %7s %63s", left, rel, right);
-            load_operand(left,  "R1");
-            load_operand(right, "R2");
-            printf("  CMP R1, R2\n");
-            printf("  %s %s\n", branch_for_relop(rel), q->res);
+            } else if (strcmp(q->op, "ifgoto") == 0) {
+                char left[64], rel[8], right[64];
+                sscanf(q->arg1, "%63s %7s %63s", left, rel, right);
+                load_operand(left,  "R1");
+                load_operand(right, "R2");
+                printf("  CMP R1, R2\n");
+                printf("  %s %s\n", branch_for_relop(rel), q->res);
 
-        } else if (strcmp(q->op, "+") == 0 || strcmp(q->op, "-") == 0 ||
-                   strcmp(q->op, "*") == 0 || strcmp(q->op, "/") == 0) {
-            load_operand(q->arg1, "R1");
-            load_operand(q->arg2, "R2");
-            if (strcmp(q->op, "+") == 0) printf("  ADD R1, R2\n");
-            if (strcmp(q->op, "-") == 0) printf("  SUB R1, R2\n");
-            if (strcmp(q->op, "*") == 0) printf("  MUL R1, R2\n");
-            if (strcmp(q->op, "/") == 0) printf("  DIV R1, R2\n");
-            printf("  STORE R1, %s\n", q->res);
+            } else if (strcmp(q->op, "+") == 0 || strcmp(q->op, "-") == 0 ||
+                    strcmp(q->op, "*") == 0 || strcmp(q->op, "/") == 0) {
+                load_operand(q->arg1, "R1");
+                load_operand(q->arg2, "R2");
+                if (strcmp(q->op, "+") == 0) printf("  ADD R1, R2\n");
+                if (strcmp(q->op, "-") == 0) printf("  SUB R1, R2\n");
+                if (strcmp(q->op, "*") == 0) printf("  MUL R1, R2\n");
+                if (strcmp(q->op, "/") == 0) printf("  DIV R1, R2\n");
+                printf("  STORE R1, %s\n", q->res);
 
-        } else if (strcmp(q->op, "=") == 0) {
-            load_operand(q->arg1, "R1");
-            printf("  STORE R1, %s\n", q->res);
+            } else if (strcmp(q->op, "=") == 0) {
+                load_operand(q->arg1, "R1");
+                printf("  STORE R1, %s\n", q->res);
+            }
         }
     }
-}
 
+    
 
-#line 581 "toy.tab.c"
+#line 582 "toy.tab.c"
 
 # ifndef YY_CAST
 #  ifdef __cplusplus
@@ -631,18 +632,19 @@ enum yysymbol_kind_t
   YYSYMBOL_program = 23,                   /* program  */
   YYSYMBOL_stmts = 24,                     /* stmts  */
   YYSYMBOL_stmt = 25,                      /* stmt  */
-  YYSYMBOL_block = 26,                     /* block  */
-  YYSYMBOL_decl = 27,                      /* decl  */
-  YYSYMBOL_idlist = 28,                    /* idlist  */
-  YYSYMBOL_assign = 29,                    /* assign  */
-  YYSYMBOL_expr = 30,                      /* expr  */
-  YYSYMBOL_cond = 31,                      /* cond  */
-  YYSYMBOL_if_header = 32,                 /* if_header  */
-  YYSYMBOL_while_header = 33,              /* while_header  */
-  YYSYMBOL_34_1 = 34,                      /* $@1  */
-  YYSYMBOL_if_stmt = 35,                   /* if_stmt  */
-  YYSYMBOL_36_2 = 36,                      /* $@2  */
-  YYSYMBOL_while_stmt = 37                 /* while_stmt  */
+  YYSYMBOL_non_if_stmt = 26,               /* non_if_stmt  */
+  YYSYMBOL_matched_stmt = 27,              /* matched_stmt  */
+  YYSYMBOL_unmatched_stmt = 28,            /* unmatched_stmt  */
+  YYSYMBOL_else_prep = 29,                 /* else_prep  */
+  YYSYMBOL_block = 30,                     /* block  */
+  YYSYMBOL_decl = 31,                      /* decl  */
+  YYSYMBOL_idlist = 32,                    /* idlist  */
+  YYSYMBOL_assign = 33,                    /* assign  */
+  YYSYMBOL_expr = 34,                      /* expr  */
+  YYSYMBOL_cond = 35,                      /* cond  */
+  YYSYMBOL_if_header = 36,                 /* if_header  */
+  YYSYMBOL_while_header = 37,              /* while_header  */
+  YYSYMBOL_38_1 = 38                       /* $@1  */
 };
 typedef enum yysymbol_kind_t yysymbol_kind_t;
 
@@ -968,18 +970,18 @@ union yyalloc
 #endif /* !YYCOPY_NEEDED */
 
 /* YYFINAL -- State number of the termination state.  */
-#define YYFINAL  25
+#define YYFINAL  26
 /* YYLAST -- Last index in YYTABLE.  */
-#define YYLAST   78
+#define YYLAST   74
 
 /* YYNTOKENS -- Number of terminals.  */
 #define YYNTOKENS  22
 /* YYNNTS -- Number of nonterminals.  */
-#define YYNNTS  16
+#define YYNNTS  17
 /* YYNRULES -- Number of rules.  */
-#define YYNRULES  31
+#define YYNRULES  34
 /* YYNSTATES -- Number of states.  */
-#define YYNSTATES  59
+#define YYNSTATES  63
 
 /* YYMAXUTOK -- Last valid token kind.  */
 #define YYMAXUTOK   265
@@ -1029,10 +1031,10 @@ static const yytype_int8 yytranslate[] =
 /* YYRLINE[YYN] -- Source line where rule number YYN was defined.  */
 static const yytype_int16 yyrline[] =
 {
-       0,   546,   546,   552,   557,   566,   571,   576,   581,   586,
-     591,   596,   604,   610,   618,   625,   637,   656,   667,   678,
-     689,   700,   704,   711,   722,   735,   748,   747,   765,   771,
-     770,   785
+       0,   547,   547,   553,   558,   567,   571,   578,   583,   588,
+     593,   598,   606,   610,   622,   636,   642,   654,   669,   678,
+     689,   697,   704,   716,   735,   746,   757,   768,   779,   783,
+     790,   801,   814,   827,   826
 };
 #endif
 
@@ -1051,9 +1053,9 @@ static const char *const yytname[] =
   "\"end of file\"", "error", "\"invalid token\"", "ID", "NUM", "RELOP",
   "INT", "IF", "ELSE", "WHILE", "'='", "'+'", "'-'", "'*'", "'/'",
   "LOWER_THAN_ELSE", "';'", "'{'", "'}'", "','", "'('", "')'", "$accept",
-  "program", "stmts", "stmt", "block", "decl", "idlist", "assign", "expr",
-  "cond", "if_header", "while_header", "$@1", "if_stmt", "$@2",
-  "while_stmt", YY_NULLPTR
+  "program", "stmts", "stmt", "non_if_stmt", "matched_stmt",
+  "unmatched_stmt", "else_prep", "block", "decl", "idlist", "assign",
+  "expr", "cond", "if_header", "while_header", "$@1", YY_NULLPTR
 };
 
 static const char *
@@ -1068,7 +1070,7 @@ yysymbol_name (yysymbol_kind_t yysymbol)
 #define yypact_value_is_default(Yyn) \
   ((Yyn) == YYPACT_NINF)
 
-#define YYTABLE_NINF (-3)
+#define YYTABLE_NINF (-19)
 
 #define yytable_value_is_error(Yyn) \
   0
@@ -1077,12 +1079,13 @@ yysymbol_name (yysymbol_kind_t yysymbol)
    STATE-NUM.  */
 static const yytype_int8 yypact[] =
 {
-      61,   -15,     3,    11,    -1,   -18,   -18,    61,    18,    31,
-     -18,   -18,    13,    17,    61,    61,   -18,   -18,   -18,     0,
-     -18,    16,     0,    19,    43,   -18,   -18,   -18,   -18,    28,
-     -18,   -18,   -18,     0,    10,    39,    60,    22,     0,   -18,
-     -18,    -4,     0,     0,     0,     0,   -18,     0,   -18,    24,
-      61,   -18,    -2,    -2,   -18,   -18,    10,   -18,   -18
+      55,    -5,     7,    19,     5,   -18,   -18,    55,    29,     3,
+     -18,   -18,   -18,   -18,   -18,    23,    26,    55,    55,   -18,
+       4,   -18,    32,     4,    25,    37,   -18,   -18,   -18,   -18,
+     -18,    44,   -18,   -18,   -18,   -18,     4,    54,    56,    36,
+      39,     4,   -18,    49,     2,     4,     4,     4,     4,   -18,
+       4,   -18,    42,    55,   -18,    14,    14,   -18,   -18,    54,
+     -18,   -18,   -18
 };
 
 /* YYDEFACT[STATE-NUM] -- Default reduction number in state STATE-NUM.
@@ -1090,26 +1093,27 @@ static const yytype_int8 yypact[] =
    means the default is an error.  */
 static const yytype_int8 yydefact[] =
 {
-       0,     0,     0,     0,     0,    26,    10,     0,     0,     0,
-       4,     9,     0,     0,     0,     0,     7,     8,    11,     0,
-      15,    13,     0,     0,     0,     1,     3,     5,     6,    28,
-      31,    22,    23,     0,    16,     0,     0,     0,     0,    12,
-      29,     0,     0,     0,     0,     0,    14,     0,    25,     0,
-       0,    21,    17,    18,    19,    20,    24,    27,    30
+       0,     0,     0,     0,     0,    33,    10,     0,     0,     0,
+       4,    12,     5,     6,     9,     0,     0,     0,     0,    11,
+       0,    22,    20,     0,     0,     0,     1,     3,     7,     8,
+      15,     5,    13,    16,    29,    30,     0,    23,     0,     0,
+       0,     0,    19,     0,     0,     0,     0,     0,     0,    21,
+       0,    32,     0,     0,    28,    24,    25,    26,    27,    31,
+      34,    14,    17
 };
 
 /* YYPGOTO[NTERM-NUM].  */
 static const yytype_int8 yypgoto[] =
 {
-     -18,   -18,    44,    -9,   -18,   -18,   -18,   -18,   -17,    15,
-     -18,   -18,   -18,   -18,   -18,   -18
+     -18,   -18,    62,     9,   -18,   -17,   -16,   -18,   -18,   -18,
+     -18,   -18,   -15,    33,   -18,   -18,   -18
 };
 
 /* YYDEFGOTO[NTERM-NUM].  */
 static const yytype_int8 yydefgoto[] =
 {
-       0,     8,     9,    10,    11,    12,    21,    13,    36,    37,
-      14,    15,    23,    16,    50,    17
+       0,     8,     9,    10,    11,    12,    13,    43,    14,    15,
+      22,    16,    39,    40,    17,    18,    24
 };
 
 /* YYTABLE[YYPACT[STATE-NUM]] -- What to do in state STATE-NUM.  If
@@ -1117,26 +1121,26 @@ static const yytype_int8 yydefgoto[] =
    number is the opposite.  If YYTABLE_NINF, syntax error.  */
 static const yytype_int8 yytable[] =
 {
-      26,    18,    34,    31,    32,    29,    30,    42,    43,    44,
-      45,    44,    45,    19,    20,    26,    41,    51,    25,    22,
-      33,    42,    43,    44,    45,    52,    53,    54,    55,    27,
-      56,    -2,     1,    28,     2,    35,    40,     3,     4,    38,
-       5,    58,    46,    48,     1,    57,     2,     6,     7,     3,
-       4,    24,     5,    49,     0,     0,     0,     0,     0,     6,
-       7,    39,     1,     0,     2,    47,     0,     3,     4,     0,
-       5,    42,    43,    44,    45,     0,     0,     6,     7
+      31,    32,    33,    -2,     1,    37,     2,    34,    35,     3,
+       4,    19,     5,    45,    46,    47,    48,    20,    27,     6,
+       7,    44,    21,    54,    36,    23,    30,    47,    48,    26,
+      55,    56,    57,    58,    27,    59,    61,    62,     1,    28,
+       2,    50,    29,     3,     4,    41,     5,    45,    46,    47,
+      48,    38,   -18,     6,     7,    42,     1,    53,     2,    49,
+      51,     3,     4,    60,     5,    45,    46,    47,    48,    25,
+       0,     6,     7,     0,    52
 };
 
 static const yytype_int8 yycheck[] =
 {
-       9,    16,    19,     3,     4,    14,    15,    11,    12,    13,
-      14,    13,    14,    10,     3,    24,    33,    21,     0,    20,
-      20,    11,    12,    13,    14,    42,    43,    44,    45,    16,
-      47,     0,     1,    16,     3,    19,     8,     6,     7,    20,
-       9,    50,     3,    21,     1,    21,     3,    16,    17,     6,
-       7,     7,     9,    38,    -1,    -1,    -1,    -1,    -1,    16,
-      17,    18,     1,    -1,     3,     5,    -1,     6,     7,    -1,
-       9,    11,    12,    13,    14,    -1,    -1,    16,    17
+      17,    18,    18,     0,     1,    20,     3,     3,     4,     6,
+       7,    16,     9,    11,    12,    13,    14,    10,     9,    16,
+      17,    36,     3,    21,    20,    20,    17,    13,    14,     0,
+      45,    46,    47,    48,    25,    50,    53,    53,     1,    16,
+       3,     5,    16,     6,     7,    20,     9,    11,    12,    13,
+      14,    19,     8,    16,    17,    18,     1,     8,     3,     3,
+      21,     6,     7,    21,     9,    11,    12,    13,    14,     7,
+      -1,    16,    17,    -1,    41
 };
 
 /* YYSTOS[STATE-NUM] -- The symbol kind of the accessing symbol of
@@ -1144,29 +1148,30 @@ static const yytype_int8 yycheck[] =
 static const yytype_int8 yystos[] =
 {
        0,     1,     3,     6,     7,     9,    16,    17,    23,    24,
-      25,    26,    27,    29,    32,    33,    35,    37,    16,    10,
-       3,    28,    20,    34,    24,     0,    25,    16,    16,    25,
-      25,     3,     4,    20,    30,    19,    30,    31,    20,    18,
-       8,    30,    11,    12,    13,    14,     3,     5,    21,    31,
-      36,    21,    30,    30,    30,    30,    30,    21,    25
+      25,    26,    27,    28,    30,    31,    33,    36,    37,    16,
+      10,     3,    32,    20,    38,    24,     0,    25,    16,    16,
+      25,    27,    27,    28,     3,     4,    20,    34,    19,    34,
+      35,    20,    18,    29,    34,    11,    12,    13,    14,     3,
+       5,    21,    35,     8,    21,    34,    34,    34,    34,    34,
+      21,    27,    28
 };
 
 /* YYR1[RULE-NUM] -- Symbol kind of the left-hand side of rule RULE-NUM.  */
 static const yytype_int8 yyr1[] =
 {
-       0,    22,    23,    24,    24,    25,    25,    25,    25,    25,
-      25,    25,    26,    27,    28,    28,    29,    30,    30,    30,
-      30,    30,    30,    30,    31,    32,    34,    33,    35,    36,
-      35,    37
+       0,    22,    23,    24,    24,    25,    25,    26,    26,    26,
+      26,    26,    27,    27,    27,    28,    28,    28,    29,    30,
+      31,    32,    32,    33,    34,    34,    34,    34,    34,    34,
+      34,    35,    36,    38,    37
 };
 
 /* YYR2[RULE-NUM] -- Number of symbols on the right-hand side of rule RULE-NUM.  */
 static const yytype_int8 yyr2[] =
 {
-       0,     2,     1,     2,     1,     2,     2,     1,     1,     1,
-       1,     2,     3,     2,     3,     1,     3,     3,     3,     3,
-       3,     3,     1,     1,     3,     4,     0,     5,     2,     0,
-       5,     2
+       0,     2,     1,     2,     1,     1,     1,     2,     2,     1,
+       1,     2,     1,     2,     5,     2,     2,     5,     0,     3,
+       2,     3,     1,     3,     3,     3,     3,     3,     3,     1,
+       1,     3,     4,     0,     5
 };
 
 
@@ -1630,314 +1635,378 @@ yyreduce:
   switch (yyn)
     {
   case 2: /* program: stmts  */
-#line 547 "toy.y"
-      {
-          root = (yyvsp[0].node);
-      }
-#line 1638 "toy.tab.c"
+#line 548 "toy.y"
+        {
+            root = (yyvsp[0].node);
+        }
+#line 1643 "toy.tab.c"
     break;
 
   case 3: /* stmts: stmts stmt  */
-#line 553 "toy.y"
-      {
-          addChild((yyvsp[-1].node), (yyvsp[0].node));
-          (yyval.node) = (yyvsp[-1].node);
-      }
-#line 1647 "toy.tab.c"
+#line 554 "toy.y"
+        {
+            addChild((yyvsp[-1].node), (yyvsp[0].node));
+            (yyval.node) = (yyvsp[-1].node);
+        }
+#line 1652 "toy.tab.c"
     break;
 
   case 4: /* stmts: stmt  */
-#line 558 "toy.y"
-      {
-          ASTNode *n = makeNode("stmts");
-          addChild(n, (yyvsp[0].node));
-          (yyval.node) = n;
-      }
-#line 1657 "toy.tab.c"
+#line 559 "toy.y"
+        {
+            ASTNode *n = makeNode("stmts");
+            addChild(n, (yyvsp[0].node));
+            (yyval.node) = n;
+        }
+#line 1662 "toy.tab.c"
     break;
 
-  case 5: /* stmt: decl ';'  */
-#line 567 "toy.y"
-      {
-          (yyval.node) = (yyvsp[-1].node);
-      }
-#line 1665 "toy.tab.c"
+  case 5: /* stmt: matched_stmt  */
+#line 568 "toy.y"
+        {
+            (yyval.node) = (yyvsp[0].node);
+        }
+#line 1670 "toy.tab.c"
     break;
 
-  case 6: /* stmt: assign ';'  */
+  case 6: /* stmt: unmatched_stmt  */
 #line 572 "toy.y"
-      {
-          (yyval.node) = (yyvsp[-1].node);
-      }
-#line 1673 "toy.tab.c"
+        {
+            (yyval.node) = (yyvsp[0].node);
+        }
+#line 1678 "toy.tab.c"
     break;
 
-  case 7: /* stmt: if_stmt  */
-#line 577 "toy.y"
-      {
-          (yyval.node) = makeNode("if");
-      }
-#line 1681 "toy.tab.c"
+  case 7: /* non_if_stmt: decl ';'  */
+#line 579 "toy.y"
+        {
+            (yyval.node) = (yyvsp[-1].node);
+        }
+#line 1686 "toy.tab.c"
     break;
 
-  case 8: /* stmt: while_stmt  */
-#line 582 "toy.y"
-      {
-          (yyval.node) = makeNode("while");
-      }
-#line 1689 "toy.tab.c"
+  case 8: /* non_if_stmt: assign ';'  */
+#line 584 "toy.y"
+        {
+            (yyval.node) = (yyvsp[-1].node);
+        }
+#line 1694 "toy.tab.c"
     break;
 
-  case 9: /* stmt: block  */
-#line 587 "toy.y"
-      {
-          (yyval.node) = makeNode("block");
-      }
-#line 1697 "toy.tab.c"
+  case 9: /* non_if_stmt: block  */
+#line 589 "toy.y"
+        {
+            (yyval.node) = (yyvsp[0].node);
+        }
+#line 1702 "toy.tab.c"
     break;
 
-  case 10: /* stmt: ';'  */
-#line 592 "toy.y"
-      {
-          (yyval.node) = makeNode("empty");
-      }
-#line 1705 "toy.tab.c"
+  case 10: /* non_if_stmt: ';'  */
+#line 594 "toy.y"
+        {
+            (yyval.node) = makeNode("empty");
+        }
+#line 1710 "toy.tab.c"
     break;
 
-  case 11: /* stmt: error ';'  */
-#line 597 "toy.y"
-      {
-          yyerrok;
-          (yyval.node) = makeNode("error");
-      }
-#line 1714 "toy.tab.c"
+  case 11: /* non_if_stmt: error ';'  */
+#line 599 "toy.y"
+        {
+            yyerrok;
+            (yyval.node) = makeNode("error");
+        }
+#line 1719 "toy.tab.c"
     break;
 
-  case 13: /* decl: INT idlist  */
+  case 12: /* matched_stmt: non_if_stmt  */
+#line 607 "toy.y"
+        {
+            (yyval.node) = (yyvsp[0].node);
+        }
+#line 1727 "toy.tab.c"
+    break;
+
+  case 13: /* matched_stmt: while_header matched_stmt  */
 #line 611 "toy.y"
-      {
-          ASTNode *n = makeNode("decl(int)");
-          addChild(n, (yyvsp[0].node));
-          (yyval.node) = n;
-      }
-#line 1724 "toy.tab.c"
+        {
+            ASTNode *n = makeNode("while");
+            addChild(n, makeNode("condition"));
+            addChild(n, (yyvsp[0].node));
+
+            emit("goto",  "", "", while_start());
+            emit("label", "", "", while_end());
+            pop_while();
+
+            (yyval.node) = n;
+        }
+#line 1743 "toy.tab.c"
     break;
 
-  case 14: /* idlist: idlist ',' ID  */
-#line 619 "toy.y"
-      {
-          declare_var((yyvsp[0].str), "int");
-          addChild((yyvsp[-2].node), makeNode((yyvsp[0].str)));
-          (yyval.node) = (yyvsp[-2].node);
-          free((yyvsp[0].str));
-      }
-#line 1735 "toy.tab.c"
+  case 14: /* matched_stmt: if_header matched_stmt else_prep ELSE matched_stmt  */
+#line 623 "toy.y"
+        {
+            emit("label", "", "", if_end());
+            pop_if();
+
+            ASTNode *n = makeNode("if");
+            addChild(n, makeNode("condition"));
+            addChild(n, (yyvsp[-3].node));
+            addChild(n, (yyvsp[0].node));
+            (yyval.node) = n;
+        }
+#line 1758 "toy.tab.c"
     break;
 
-  case 15: /* idlist: ID  */
-#line 626 "toy.y"
-      {
-          declare_var((yyvsp[0].str), "int");
-          ASTNode *n = makeNode("idlist");
-          addChild(n, makeNode((yyvsp[0].str)));
-          (yyval.node) = n;
-          free((yyvsp[0].str));
-      }
-#line 1747 "toy.tab.c"
+  case 15: /* unmatched_stmt: if_header stmt  */
+#line 637 "toy.y"
+        {
+            emit("label", "", "", if_false());
+            pop_if();
+            (yyval.node) = (yyvsp[0].node);
+        }
+#line 1768 "toy.tab.c"
     break;
 
-  case 16: /* assign: ID '=' expr  */
-#line 638 "toy.y"
-      {
-          int errs_before = semantic_error_count;
-          use_var((yyvsp[-2].str));
-          if (semantic_error_count == errs_before)
-              emit("=", (yyvsp[0].node)->place, "", (yyvsp[-2].str));
+  case 16: /* unmatched_stmt: while_header unmatched_stmt  */
+#line 643 "toy.y"
+        {
+            ASTNode *n = makeNode("while");
+            addChild(n, makeNode("condition"));
+            addChild(n, (yyvsp[0].node));
 
-          ASTNode *n = makeNode("=");
-          addChild(n, makeNode((yyvsp[-2].str)));
-          addChild(n, (yyvsp[0].node));
-          (yyval.node) = n;
+            emit("goto",  "", "", while_start());
+            emit("label", "", "", while_end());
+            pop_while();
 
-          free((yyvsp[-2].str));
-      }
-#line 1765 "toy.tab.c"
+            (yyval.node) = n;
+        }
+#line 1784 "toy.tab.c"
     break;
 
-  case 17: /* expr: expr '+' expr  */
-#line 657 "toy.y"
-      {
-          char *t = new_temp();
-          emit("+", (yyvsp[-2].node)->label, (yyvsp[0].node)->label, t);
+  case 17: /* unmatched_stmt: if_header matched_stmt else_prep ELSE unmatched_stmt  */
+#line 655 "toy.y"
+        {
+            emit("label", "", "", if_end());
+            pop_if();
 
-          ASTNode *n = makeNode("+");
-          addChild(n, (yyvsp[-2].node));
-          addChild(n, (yyvsp[0].node));
-          strcpy(n->place, t); 
-          (yyval.node) = n;
-      }
-#line 1780 "toy.tab.c"
+            ASTNode *n = makeNode("if");
+            addChild(n, makeNode("condition"));
+            addChild(n, (yyvsp[-3].node));
+            addChild(n, (yyvsp[0].node));
+            (yyval.node) = n;
+        }
+#line 1799 "toy.tab.c"
     break;
 
-  case 18: /* expr: expr '-' expr  */
-#line 668 "toy.y"
-      {
-          char *t = new_temp();
-          emit("-", (yyvsp[-2].node)->label, (yyvsp[0].node)->label, t);
-
-          ASTNode *n = makeNode("-");
-          addChild(n, (yyvsp[-2].node));
-          addChild(n, (yyvsp[0].node));
-          strcpy(n->place, t); 
-          (yyval.node) = n;
-      }
-#line 1795 "toy.tab.c"
-    break;
-
-  case 19: /* expr: expr '*' expr  */
-#line 679 "toy.y"
-      {
-          char *t = new_temp();
-          emit("*", (yyvsp[-2].node)->label, (yyvsp[0].node)->label, t);
-
-          ASTNode *n = makeNode("*");
-          addChild(n, (yyvsp[-2].node));
-          addChild(n, (yyvsp[0].node));
-          strcpy(n->place, t); 
-          (yyval.node) = n;
-      }
+  case 18: /* else_prep: %empty  */
+#line 669 "toy.y"
+        {
+            /* After THEN, jump over ELSE and mark ELSE entry label. */
+            emit("goto", "", "", if_end());
+            emit("label", "", "", if_false());
+            (yyval.node) = NULL;
+        }
 #line 1810 "toy.tab.c"
     break;
 
-  case 20: /* expr: expr '/' expr  */
+  case 19: /* block: '{' stmts '}'  */
+#line 679 "toy.y"
+        {
+        ASTNode *n = makeNode("block");
+        addChild(n, (yyvsp[-1].node));
+        (yyval.node) = n;
+        }
+#line 1820 "toy.tab.c"
+    break;
+
+  case 20: /* decl: INT idlist  */
 #line 690 "toy.y"
-      {
-          char *t = new_temp();
-          emit("/", (yyvsp[-2].node)->label, (yyvsp[0].node)->label, t);
-
-          ASTNode *n = makeNode("/");
-          addChild(n, (yyvsp[-2].node));
-          addChild(n, (yyvsp[0].node));
-          strcpy(n->place, t); 
-          (yyval.node) = n;
-      }
-#line 1825 "toy.tab.c"
+        {
+            ASTNode *n = makeNode("decl(int)");
+            addChild(n, (yyvsp[0].node));
+            (yyval.node) = n;
+        }
+#line 1830 "toy.tab.c"
     break;
 
-  case 21: /* expr: '(' expr ')'  */
-#line 701 "toy.y"
-      {
-          (yyval.node) = (yyvsp[-1].node);
-      }
-#line 1833 "toy.tab.c"
+  case 21: /* idlist: idlist ',' ID  */
+#line 698 "toy.y"
+        {
+            declare_var((yyvsp[0].str), "int");
+            addChild((yyvsp[-2].node), makeNode((yyvsp[0].str)));
+            (yyval.node) = (yyvsp[-2].node);
+            free((yyvsp[0].str));
+        }
+#line 1841 "toy.tab.c"
     break;
 
-  case 22: /* expr: ID  */
+  case 22: /* idlist: ID  */
 #line 705 "toy.y"
-    {
-        use_var((yyvsp[0].str));
-        ASTNode *n = makeNode((yyvsp[0].str));
-        strcpy(n->place, (yyvsp[0].str));
-        (yyval.node) = n;
-    }
-#line 1844 "toy.tab.c"
+        {
+            declare_var((yyvsp[0].str), "int");
+            ASTNode *n = makeNode("idlist");
+            addChild(n, makeNode((yyvsp[0].str)));
+            (yyval.node) = n;
+            free((yyvsp[0].str));
+        }
+#line 1853 "toy.tab.c"
     break;
 
-  case 23: /* expr: NUM  */
-#line 712 "toy.y"
-    {
-        ASTNode *n = makeNode((yyvsp[0].str));
-        strcpy(n->place, (yyvsp[0].str));
-        (yyval.node) = n;
-    }
-#line 1854 "toy.tab.c"
+  case 23: /* assign: ID '=' expr  */
+#line 717 "toy.y"
+        {
+            int errs_before = semantic_error_count;
+            use_var((yyvsp[-2].str));
+            if (semantic_error_count == errs_before)
+                emit("=", (yyvsp[0].node)->place, "", (yyvsp[-2].str));
+
+            ASTNode *n = makeNode("=");
+            addChild(n, makeNode((yyvsp[-2].str)));
+            addChild(n, (yyvsp[0].node));
+            (yyval.node) = n;
+
+            free((yyvsp[-2].str));
+        }
+#line 1871 "toy.tab.c"
     break;
 
-  case 24: /* cond: expr RELOP expr  */
-#line 723 "toy.y"
-      {
-          char *s = malloc(strlen((yyvsp[-2].node)->label) + strlen((yyvsp[-1].str)) + strlen((yyvsp[0].node)->label) + 4);
-          sprintf(s, "%s %s %s", (yyvsp[-2].node)->label, (yyvsp[-1].str), (yyvsp[0].node)->label);
-
-          free((yyvsp[-1].str));  // RELOP string
-          (yyval.str) = s;
-      }
-#line 1866 "toy.tab.c"
-    break;
-
-  case 25: /* if_header: IF '(' cond ')'  */
+  case 24: /* expr: expr '+' expr  */
 #line 736 "toy.y"
-      {
-          push_if();
-          emit("ifgoto", (yyvsp[-1].str), "", if_true());
-          emit("goto",   "",  "", if_false());
-          emit("label",  "",  "", if_true());
-          free((yyvsp[-1].str));
-          (yyval.str) = NULL;
-      }
-#line 1879 "toy.tab.c"
+        {
+            char *t = new_temp();
+            emit("+", (yyvsp[-2].node)->place, (yyvsp[0].node)->place, t);
+
+            ASTNode *n = makeNode("+");
+            addChild(n, (yyvsp[-2].node));
+            addChild(n, (yyvsp[0].node));
+            strcpy(n->place, t); 
+            (yyval.node) = n;
+        }
+#line 1886 "toy.tab.c"
     break;
 
-  case 26: /* $@1: %empty  */
-#line 748 "toy.y"
-      {
-          push_while();
-          emit("label", "", "", while_start());
-      }
-#line 1888 "toy.tab.c"
+  case 25: /* expr: expr '-' expr  */
+#line 747 "toy.y"
+        {
+            char *t = new_temp();
+            emit("-", (yyvsp[-2].node)->place, (yyvsp[0].node)->place, t);
+
+            ASTNode *n = makeNode("-");
+            addChild(n, (yyvsp[-2].node));
+            addChild(n, (yyvsp[0].node));
+            strcpy(n->place, t); 
+            (yyval.node) = n;
+        }
+#line 1901 "toy.tab.c"
     break;
 
-  case 27: /* while_header: WHILE $@1 '(' cond ')'  */
-#line 753 "toy.y"
-      {
-          emit("ifgoto", (yyvsp[-1].str), "", while_body());
-          emit("goto",   "",  "", while_end());
-          emit("label",  "",  "", while_body());
-          free((yyvsp[-1].str));
-          (yyval.str) = NULL;
-      }
-#line 1900 "toy.tab.c"
+  case 26: /* expr: expr '*' expr  */
+#line 758 "toy.y"
+        {
+            char *t = new_temp();
+            emit("*", (yyvsp[-2].node)->place, (yyvsp[0].node)->place, t);
+
+            ASTNode *n = makeNode("*");
+            addChild(n, (yyvsp[-2].node));
+            addChild(n, (yyvsp[0].node));
+            strcpy(n->place, t); 
+            (yyval.node) = n;
+        }
+#line 1916 "toy.tab.c"
     break;
 
-  case 28: /* if_stmt: if_header stmt  */
-#line 766 "toy.y"
-      {
-          emit("label", "", "", if_false());
-          pop_if();
-      }
-#line 1909 "toy.tab.c"
+  case 27: /* expr: expr '/' expr  */
+#line 769 "toy.y"
+        {
+            char *t = new_temp();
+            emit("/", (yyvsp[-2].node)->place, (yyvsp[0].node)->place, t);
+
+            ASTNode *n = makeNode("/");
+            addChild(n, (yyvsp[-2].node));
+            addChild(n, (yyvsp[0].node));
+            strcpy(n->place, t); 
+            (yyval.node) = n;
+        }
+#line 1931 "toy.tab.c"
     break;
 
-  case 29: /* $@2: %empty  */
-#line 771 "toy.y"
-      {
-          emit("goto",  "", "", if_end());
-          emit("label", "", "", if_false());
-      }
-#line 1918 "toy.tab.c"
+  case 28: /* expr: '(' expr ')'  */
+#line 780 "toy.y"
+        {
+            (yyval.node) = (yyvsp[-1].node);
+        }
+#line 1939 "toy.tab.c"
     break;
 
-  case 30: /* if_stmt: if_header stmt ELSE $@2 stmt  */
-#line 776 "toy.y"
-      {
-          emit("label", "", "", if_end());
-          pop_if();
-      }
-#line 1927 "toy.tab.c"
+  case 29: /* expr: ID  */
+#line 784 "toy.y"
+        {
+            use_var((yyvsp[0].str));
+            ASTNode *n = makeNode((yyvsp[0].str));
+            strcpy(n->place, (yyvsp[0].str));
+            (yyval.node) = n;
+        }
+#line 1950 "toy.tab.c"
     break;
 
-  case 31: /* while_stmt: while_header stmt  */
-#line 786 "toy.y"
-      {
-          emit("goto",  "", "", while_start());
-          emit("label", "", "", while_end());
-          pop_while();
-      }
-#line 1937 "toy.tab.c"
+  case 30: /* expr: NUM  */
+#line 791 "toy.y"
+        {
+            ASTNode *n = makeNode((yyvsp[0].str));
+            strcpy(n->place, (yyvsp[0].str));
+            (yyval.node) = n;
+        }
+#line 1960 "toy.tab.c"
+    break;
+
+  case 31: /* cond: expr RELOP expr  */
+#line 802 "toy.y"
+        {
+            char *s = malloc(strlen((yyvsp[-2].node)->label) + strlen((yyvsp[-1].str)) + strlen((yyvsp[0].node)->label) + 4);
+            sprintf(s, "%s %s %s", (yyvsp[-2].node)->label, (yyvsp[-1].str), (yyvsp[0].node)->label);
+
+            free((yyvsp[-1].str));  // RELOP string
+            (yyval.str) = s;
+        }
+#line 1972 "toy.tab.c"
+    break;
+
+  case 32: /* if_header: IF '(' cond ')'  */
+#line 815 "toy.y"
+        {
+            push_if();
+            emit("ifgoto", (yyvsp[-1].str), "", if_true());
+            emit("goto",   "",  "", if_false());
+            emit("label",  "",  "", if_true());
+            free((yyvsp[-1].str));
+            (yyval.str) = NULL;
+        }
+#line 1985 "toy.tab.c"
+    break;
+
+  case 33: /* $@1: %empty  */
+#line 827 "toy.y"
+        {
+            push_while();
+            emit("label", "", "", while_start());
+        }
+#line 1994 "toy.tab.c"
+    break;
+
+  case 34: /* while_header: WHILE $@1 '(' cond ')'  */
+#line 832 "toy.y"
+        {
+            emit("ifgoto", (yyvsp[-1].str), "", while_body());
+            emit("goto",   "",  "", while_end());
+            emit("label",  "",  "", while_body());
+            free((yyvsp[-1].str));
+            (yyval.str) = NULL;
+        }
+#line 2006 "toy.tab.c"
     break;
 
 
-#line 1941 "toy.tab.c"
+#line 2010 "toy.tab.c"
 
       default: break;
     }
@@ -2130,111 +2199,111 @@ yyreturnlab:
   return yyresult;
 }
 
-#line 793 "toy.y"
+#line 841 "toy.y"
 
 
-/* ================================================================
-   Error callback
-   ================================================================ */
+    /* ================================================================
+    Error callback
+    ================================================================ */
 
-static int syntax_error_count = 0;
+    static int syntax_error_count = 0;
 
-void yyerror(const char *s) {
-    if (!dump_lex) {   /* only report errors during the parse pass */
-        printf("  Line %d: Syntax error - %s\n", yylineno, s);
-        syntax_error_count++;
-    }
-}
-
-/* ================================================================
-   Global reset (between lex pass and parse pass)
-   ================================================================ */
-
-static void reset_state(void) {
-    sc                  = 0;
-    constCount          = 0;
-    qCount              = 0;
-    optCount            = 0;
-    tempCount           = 1;
-    labelCount          = 1;
-    ifTop               = -1;
-    whileTop            = -1;
-    syntax_error_count  = 0;
-    semantic_error_count = 0;
-}
-
-/* ================================================================
-   main
-   ================================================================ */
-
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <input_file>\n", argv[0]);
-        return 1;
+    void yyerror(const char *s) {
+        if (!dump_lex) {   /* only report errors during the parse pass */
+            printf("  Line %d: Syntax error - %s\n", yylineno, s);
+            syntax_error_count++;
+        }
     }
 
-    FILE *fp = fopen(argv[1], "r");
-    if (!fp) { perror("Cannot open input file"); return 1; }
+    /* ================================================================
+    Global reset (between lex pass and parse pass)
+    ================================================================ */
 
-    yyin = fp;
-
-    /* ── Phase 1: Lexical Analysis ─────────────────────────────── */
-    printf("[Phase 1] Lexical Analysis\n");
-    printf("--------------------------\n");
-    dump_lex = 1;
-    while (yylex() != 0) { }
-
-    /* Reset for the parse pass */
-    rewind(fp);
-    yyrestart(fp);
-    yylineno = 1;
-    reset_state();
-    dump_lex = 0;
-
-    /* ── Phase 2: Syntax Analysis ──────────────────────────────── */
-    printf("\n[Phase 2] Syntax Analysis\n");
-    printf("--------------------------\n");
-    yyparse();   /* always run to completion — error recovery handles bad stmts */
-    if (syntax_error_count > 0) {
-        printf("Found %d syntax error(s). Erroneous statements skipped.\n", syntax_error_count);
-    } else {
-        printf("No syntax errors.\n");
-        printf("\nSyntax Tree\n");
-        printf("------------\n");
-        int prefix[100] = {0};
-        printTree(root, 0, 1, prefix);
+    static void reset_state(void) {
+        sc                  = 0;
+        constCount          = 0;
+        qCount              = 0;
+        optCount            = 0;
+        tempCount           = 1;
+        labelCount          = 1;
+        ifTop               = -1;
+        whileTop            = -1;
+        syntax_error_count  = 0;
+        semantic_error_count = 0;
     }
 
-    /* ── Phase 3: Semantic Analysis ────────────────────────────── */
-    printf("\n[Phase 3] Semantic Analysis\n");
-    printf("----------------------------\n");
-    if (semantic_error_count > 0)
-        printf("Found %d semantic error(s). Affected statements skipped.\n", semantic_error_count);
-    else
-        printf("No semantic errors found\n");
+    /* ================================================================
+    main
+    ================================================================ */
 
-    /* ── Phase 4: Intermediate Code ────────────────────────────── */
-    print_symbol_table();
-    printf("\n[Phase 4] Three Address Code\n");
-    printf("-----------------------------\n");
-    print_quads(quads, qCount, "TAC");
+    int main(int argc, char *argv[]) {
+        if (argc < 2) {
+            printf("Usage: %s <input_file>\n", argv[0]);
+            return 1;
+        }
 
-    /* ── Phase 5: Optimisation ─────────────────────────────────── */
-    optimize_quads();
-    printf("\n[Phase 5] Optimized Three Address Code\n");
-    printf("---------------------------------------\n");
-    print_quads(optQuads, optCount, "Optimized TAC");
+        FILE *fp = fopen(argv[1], "r");
+        if (!fp) { perror("Cannot open input file"); return 1; }
 
-    /* ── Phase 6: Target Code ───────────────────────────────────── */
-    printf("\n[Phase 6] Target Code Generation\n");
-    printf("---------------------------------\n");
-    generate_assembly(optQuads, optCount);
+        yyin = fp;
 
-    if (syntax_error_count == 0 && semantic_error_count == 0)
-        printf("\nCompilation successful.\n");
-    else
-        printf("\nCompilation done. Syntax errors: %d, Semantic errors: %d\n", syntax_error_count, semantic_error_count);
+        /* ── Phase 1: Lexical Analysis ─────────────────────────────── */
+        printf("[Phase 1] Lexical Analysis\n");
+        printf("--------------------------\n");
+        dump_lex = 1;
+        while (yylex() != 0) { }
 
-    fclose(fp);
-    return 0;
-}
+        /* Reset for the parse pass */
+        rewind(fp);
+        yyrestart(fp);
+        yylineno = 1;
+        reset_state();
+        dump_lex = 0;
+
+        /* ── Phase 2: Syntax Analysis ──────────────────────────────── */
+        printf("\n[Phase 2] Syntax Analysis\n");
+        printf("--------------------------\n");
+        yyparse();   /* always run to completion — error recovery handles bad stmts */
+        if (syntax_error_count > 0) {
+            printf("Found %d syntax error(s). Erroneous statements skipped.\n", syntax_error_count);
+        } else {
+            printf("No syntax errors.\n");
+            printf("\nSyntax Tree\n");
+            printf("------------\n");
+            int prefix[100] = {0};
+            printTree(root, 0, 1, prefix);
+        }
+
+        /* ── Phase 3: Semantic Analysis ────────────────────────────── */
+        printf("\n[Phase 3] Semantic Analysis\n");
+        printf("----------------------------\n");
+        if (semantic_error_count > 0)
+            printf("Found %d semantic error(s). Affected statements skipped.\n", semantic_error_count);
+        else
+            printf("No semantic errors found\n");
+
+        /* ── Phase 4: Intermediate Code ────────────────────────────── */
+        print_symbol_table();
+        printf("\n[Phase 4] Three Address Code\n");
+        printf("-----------------------------\n");
+        print_quads(quads, qCount, "TAC");
+
+        /* ── Phase 5: Optimisation ─────────────────────────────────── */
+        optimize_quads();
+        printf("\n[Phase 5] Optimized Three Address Code\n");
+        printf("---------------------------------------\n");
+        print_quads(optQuads, optCount, "Optimized TAC");
+
+        /* ── Phase 6: Target Code ───────────────────────────────────── */
+        printf("\n[Phase 6] Target Code Generation\n");
+        printf("---------------------------------\n");
+        generate_assembly(optQuads, optCount);
+
+        if (syntax_error_count == 0 && semantic_error_count == 0)
+            printf("\nCompilation successful.\n");
+        else
+            printf("\nCompilation done. Syntax errors: %d, Semantic errors: %d\n", syntax_error_count, semantic_error_count);
+
+        fclose(fp);
+        return 0;
+    }

@@ -47,9 +47,10 @@ extern int yydebug;
 /* "%code requires" blocks.  */
 #line 515 "toy.y"
 
-    typedef struct ASTNode ASTNode;
+        typedef struct ASTNode ASTNode;
+    
 
-#line 53 "toy.tab.h"
+#line 54 "toy.tab.h"
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
@@ -78,10 +79,11 @@ union YYSTYPE
 {
 #line 519 "toy.y"
 
-    char *str;
-    ASTNode *node;
+        char *str;
+        ASTNode *node;
+    
 
-#line 85 "toy.tab.h"
+#line 87 "toy.tab.h"
 
 };
 typedef union YYSTYPE YYSTYPE;
