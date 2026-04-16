@@ -22,8 +22,8 @@
     ───────────────────────────────────────── */
 
     typedef struct ASTNode {
-        char label[64];     // for tree (like "+")
-        char place[64];     // for TAC (like "t1")
+        char label[64];
+        char place[64];
         struct ASTNode *children[10];
         int count;
     } ASTNode;
@@ -33,7 +33,7 @@
     ASTNode* makeNode(const char *label) {
         ASTNode *n = malloc(sizeof(ASTNode));
         strcpy(n->label, label);
-        strcpy(n->place, label);   // default
+        strcpy(n->place, label);
         n->count = 0;
         return n;
     }
@@ -45,7 +45,6 @@
     void printTree(ASTNode *node, int depth, int isLast, int prefix[]) {
         if (!node) return;
 
-        // print branches
         for (int i = 0; i < depth; i++) {
             if (prefix[i])
                 printf("│   ");
@@ -62,7 +61,6 @@
 
         printf("%s\n", node->label);
 
-        // update prefix for children
         if (depth >= 0)
             prefix[depth] = !isLast;
 
@@ -102,7 +100,7 @@
     ───────────────────────────────────────── */
     typedef struct {
         char name[32];
-        char type[16];   /* "int"*/
+        char type[16];   /*"int"*/
     } Symbol;
 
     Symbol symTable[MAX_SYMBOLS];
@@ -184,16 +182,13 @@
     /* Semantic error counter */
     static int semantic_error_count = 0;
 
-    /* Returns the type string for the variable.
-    On undeclared variable: records the error, returns "int" as safe dummy
-    so parsing and code-gen can continue for all remaining statements. */
     static const char *use_var(const char *name) {
         int idx = lookup_symbol(name);
         if (idx < 0) {
             printf("  Line %d: Semantic error - undeclared variable '%s'\n",
                 yylineno, name);
             semantic_error_count++;
-            return "int";   /* safe dummy — let compilation continue */
+            return "int";
         }
         return symTable[idx].type;
     }
@@ -349,7 +344,7 @@
                         optCount++;
                         kill_const(target);
                     }
-                    i++;   /* skip the "= t" quad */
+                    i++;
                     continue;
                 }
 
@@ -397,7 +392,7 @@
             } else if (strcmp(q.op, "label")   == 0 ||
                     strcmp(q.op, "goto")    == 0 ||
                     strcmp(q.op, "ifgoto")  == 0) {
-                clear_consts();          /* conservative: kill all on branch */
+                clear_consts();
                 strcpy(optQuads[optCount].op,   q.op);
                 strcpy(optQuads[optCount].arg1, q.arg1);
                 strcpy(optQuads[optCount].arg2, q.arg2);
@@ -667,7 +662,6 @@
     else_prep
         :
         {
-            /* After THEN, jump over ELSE and mark ELSE entry label. */
             emit("goto", "", "", if_end());
             emit("label", "", "", if_false());
             $$ = NULL;
@@ -803,12 +797,11 @@
             char *s = malloc(strlen($1->label) + strlen($2) + strlen($3->label) + 4);
             sprintf(s, "%s %s %s", $1->label, $2, $3->label);
 
-            free($2);  // RELOP string
+            free($2);
             $$ = s;
         }
         ;
 
-    /* ── Named markers to avoid mid-rule-action reduce/reduce conflicts ── */
 
     if_header
         : IF '(' cond ')'
@@ -847,7 +840,7 @@
     static int syntax_error_count = 0;
 
     void yyerror(const char *s) {
-        if (!dump_lex) {   /* only report errors during the parse pass */
+        if (!dump_lex) {
             printf("  Line %d: Syntax error - %s\n", yylineno, s);
             syntax_error_count++;
         }
@@ -901,7 +894,7 @@
         /* ── Phase 2: Syntax Analysis ──────────────────────────────── */
         printf("\n[Phase 2] Syntax Analysis\n");
         printf("--------------------------\n");
-        yyparse();   /* always run to completion — error recovery handles bad stmts */
+        yyparse();
         if (syntax_error_count > 0) {
             printf("Found %d syntax error(s). Erroneous statements skipped.\n", syntax_error_count);
         } else {
